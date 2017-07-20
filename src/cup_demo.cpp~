@@ -1,0 +1,236 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <thread>
+#include <ros/ros.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <pcl/point_types.h>
+#include <pcl/point_cloud.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/ModelCoefficients.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/point_types.h>
+#include <pcl/filters/extract_indices.h>
+#include <pcl/filters/passthrough.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/features/normal_3d.h>
+#include <pcl/sample_consensus/method_types.h>
+#include <pcl/sample_consensus/model_types.h>
+#include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/registration/icp.h>
+
+typedef pcl::PointXYZ PointT;
+typedef pcl::PointCloud<PointT> PointCloudT;
+typedef pcl::Normal NormalT;
+typedef pcl::PointCloud<NormalT> CloudNormalT;
+
+std::string topicName;
+bool updateFlag;
+PointCloudT::Ptr recvCloud(new PointCloudT());
+PointCloudT::Ptr filteredCloud(new PointCloudT());
+CloudNormalT::Ptr cloudNormals(new CloudNormalT);
+PointCloudT::Ptr baseCylinder(new PointCloudT);
+PointCloudT::Ptr alignedCylinder(new PointCloudT);
+Eigen::Matrix4f transformation(Eigen::Matrix4f::Identity());
+float leafSize;
+double passXmin,passXmax,passYmin,passYmax,passZmin,passZmax;
+bool initalAcquire;
+
+void initGlobalParas(void)
+{
+  topicName="UER_K2_TOPIC_CLOUDXYZ";
+  transformation=Eigen::Matrix4f::Identity();
+  leafSize=0.003;
+  passZmin=0.0;
+  passZmax=0.5;
+  passXmin=-0.5;
+  passXmax=0.5;
+  passYmin=-0.5;
+  passYmax=0.5;
+  updateFlag=false;
+  initalAcquire=true;
+}
+
+void cloudProcess(const PointCloudT::Ptr sourceCloud)
+{
+  
+  //PointCloudT::Ptr filteredCloud(new PointCloudT());
+  /*pcl::PassThrough<PointT> pass;
+  pass.setInputCloud(sourceCloud);
+  pass.setFilterFieldName("z");
+  pass.setFilterLimits(passZmin,passZmax);
+  pass.filter(*filteredCloud);
+
+  pass.setInputCloud(filteredCloud);
+  pass.setFilterFieldName("x");
+  pass.setFilterLimits(passXmin,passXmax);
+  pass.filter(*filteredCloud);
+
+  pass.setInputCloud(filteredCloud);
+  pass.setFilterFieldName("y");
+  pass.setFilterLimits(passYmin,passYmax);
+  pass.filter(*filteredCloud);
+*/
+  //Down Sample
+  pcl::VoxelGrid<PointT> grid;
+  grid.setLeafSize(leafSize,leafSize,leafSize);
+  grid.setInputCloud(filteredCloud);
+  grid.filter(*filteredCloud);
+
+}
+/*
+PointCloudT::Ptr segmentateCylinder(PointCloudT::Ptr sceneCloud)
+{
+  PointCloudT::Ptr cylinderCloud(new PointCloudT);
+  
+  //Compute Normals
+  pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>());
+  pcl::NormalEstimation<PointT,pcl::Normal> ne;
+  ne.setSearchMethod(tree);
+  ne.setInputCloud(sceneCloud);
+  ne.setKSearch(50);
+  ne.compute(*cloudNormals);
+
+  //Segment plane
+  pcl::ModelCoefficients::Ptr coefficients_plane(new pcl::ModelCoefficients);
+  pcl::ModelCoefficients::Ptr coefficients_cylinder(new pcl::ModelCoefficients);
+  pcl::PointIndices::Ptr inliers_plane(new pcl::PointIndices);
+  pcl::PointIndices::Ptr inliers_cylinder(new pcl::PointIndices);
+
+  pcl::SACSegmentationFromNormals<PointT,NormalT> seg;
+  seg.setOptimizeCoefficients(true);
+  seg.setModelType(pcl::SACMODEL_NORMAL_PLANE);
+  seg.setNormalDistanceWeight(0.1);
+  seg.setMethodType(pcl::SAC_RANSAC);
+  seg.setMaxIterations(100);
+  seg.setDistanceThreshold(0.03);
+  seg.setInputCloud(sceneCloud);
+  seg.setInputNormals(cloudNormals);
+  seg.segment(*inliers_plane,*coefficients_plane);
+  std::cout<<"segment plane, coefficients: "<<*coefficients_plane<<std::endl;
+  
+  //extract
+  pcl::ExtractIndices<PointT> extract;
+  extract.setInputCloud(sceneCloud);
+  extract.setIndices(inliers_plane);
+  extract.setNegative(true);
+  PointCloudT::Ptr cloud_withoutPlane(new PointCloudT);
+  extract.filter(*cloud_withoutPlane);
+
+  pcl::ExtractIndices<NormalT> extract_normal;
+  extract_normal.setInputCloud(cloudNormals);
+  extract_normal.setIndices(inliers_plane);
+  extract_normal.setNegative(true);
+  CloudNormalT::Ptr cloudNormal_withoutPlane(new CloudNormalT);
+  extract_normal.filter(*cloudNormal_withoutPlane);
+
+  //segment cylinder
+  seg.setOptimizeCoefficients(true);
+  seg.setModelType(pcl::SACMODEL_CYLINDER);
+  seg.setMethodType(pcl::SAC_RANSAC);
+  seg.setNormalDistanceWeight(0.1);
+  seg.setMaxIterations(500);
+  seg.setDistanceThreshold(0.05);
+  seg.setRadiusLimits(0,0.1);
+  seg.setInputCloud(cloud_withoutPlane);
+  seg.setInputNormals(cloudNormal_withoutPlane);
+  seg.segment(*inliers_cylinder,*coefficients_cylinder);
+  std::cout<<"segment cylinder, coefficients: "<<*coefficients_cylinder<<std::endl;
+
+  extract.setInputCloud(cloud_withoutPlane);
+  extract.setIndices(inliers_cylinder);
+  extract.setNegative(false);
+  extract.filter(*cylinderCloud);
+  if(cylinderCloud->points.empty())
+  {
+    std::cerr<<"Can't find cylindrical component."<<std::endl;
+  }
+
+  return cylinderCloud;
+}
+
+
+void poseEstimate(PointCloudT::Ptr targetCloud, PointCloudT::Ptr templateCloud)
+{
+  pcl::IterativeClosestPoint<PointT,PointT> icp;
+  icp.setMaximumIterations(200);
+  icp.setInputSource(templateCloud);
+  icp.setInputTarget(targetCloud);
+  icp.align(*alignedCylinder);
+  if(icp.hasConverged())
+  {
+    std::cout<<"ICP Alignment has converged."<<std::endl;
+    std::cout<<"Fitness score: "<<icp.getFitnessScore()<<std::endl;
+    transformation=icp.getFinalTransformation();
+    std::cout<<"transformation matrix: "<<std::endl<<transformation<<std::endl;
+  }
+  else
+  {
+    std::cout<<"estimate transformation error!"<<std::endl;
+  }
+}
+
+void msgCallback(const sensor_msgs::PointCloud2::ConstPtr& msg)
+{
+  pcl::fromROSMsg(*msg,*recvCloud);
+  cloudProcess(recvCloud);
+  PointCloudT::Ptr cylinder=segmentateCylinder(filteredCloud);
+  if(initalAcquire)
+    baseCylinder=cylinder;
+  else
+    baseCylinder=alignedCylinder;
+  poseEstimate(cylinder,baseCylinder);
+  initalAcquire=false;
+  updateFlag=true;
+}
+*/
+int
+main(int argc, char** argv)
+{
+  std::cout<<"Test Test Test"<<std::endl;
+  //initGlobalParas();
+  //create subscriber and register callback function
+  //ros::init(argc,argv,"cup_demo");
+  return 0;
+  ros::NodeHandle nh("Kinect2_Relay_Msg");
+  /*ros::Subscriber sub=nh.subscribe<sensor_msgs::PointCloud2>(topicName,1,msgCallback);
+
+  ros::AsyncSpinner spinner(0);
+  spinner.start();
+
+  ros::Rate rate(1000);
+  while(!updateFlag)
+  {
+    if(!ros::ok())
+    {
+      return -1;
+    }
+  }
+
+  pcl::visualization::PCLVisualizer viewer("scene cloud");
+  pcl::visualization::PointCloudColorHandlerCustom<PointT> colorHandle(recvCloud,200,200,200);
+  viewer.addPointCloud(recvCloud,colorHandle,"sceneCloud");
+  viewer.setBackgroundColor(0.05,0.05,0.05,0);
+
+  pcl::visualization::PCLVisualizer viewer_cylinder("cylinder");
+  pcl::visualization::PointCloudColorHandlerCustom<PointT> cylinderColorH(alignedCylinder,100,200,100);
+  viewer_cylinder.addPointCloud(alignedCylinder,cylinderColorH,"cylinder");
+  viewer.setBackgroundColor(0.05,0.05,0.05,0);
+
+  while(!viewer.wasStopped())
+  {
+    if(updateFlag)
+    {
+      viewer.updatePointCloud(recvCloud,"sceneCloud");
+      viewer_cylinder.updatePointCloud(alignedCylinder,"cylinder");
+      updateFlag=false;
+    }
+    viewer.spinOnce(10);
+    viewer_cylinder.spinOnce(10);
+    rate.sleep();
+  }
+
+  viewer.close();
+  viewer_cylinder.close();
+  */
+}
